@@ -77,13 +77,19 @@ function main() {
         return;
     }
 
-    //出现刷新按钮时点击刷新
+    //出现刷新按钮时点击刷新（不再每次打 log，只在首次 + 每 30 次触发 Timer.mark 留痕）
     threads.start(function () {
         log('刷新按钮自动点击线程已启动');
+        var refreshCount = 0;
         while (true) {
             textContains("刷新").waitFor();
             textContains("刷新").findOne().click();
-            log("点击刷新...");
+            refreshCount++;
+            if (refreshCount === 1) {
+                Timer.mark("刷新线程·首次点击");
+            } else if (refreshCount % 30 === 0) {
+                Timer.mark("刷新线程·已点击 " + refreshCount + " 次");
+            }
             //避免点击过快
             sleep(100);
         }
@@ -148,63 +154,129 @@ function main() {
     Timer.summary();
 }
 
-// 支付页面处理：精确点击 + 库存检测 + 超时退出，让微信指纹/支付宝免密接管
-// 旧逻辑用 className('android.widget.Button') 盲点 50ms 间隔，会点到任意按钮（如返回/取消），
-// 且无库存检测；520 次点击 ≈ 26 秒，远超热门票库存预留窗口（5–10 秒），订单必然回库。
+// 支付页面处理：三段式按钮查找 + 包名级收银台检测 + 失败时 dump 诊断
+// 设计要点：
+// 1. 用 currentPackage() 判断是否真的跳到外部微信/支付宝；只看页面文字会被 in-app 支付方式 sheet 误判
+// 2. 按钮查找三级 cascade：精确 text → textContains("支付") → className 兜底，全部排除取消/返回
+// 3. 两步支付兼容：「立即支付」→ 弹支付方式 sheet → 还要再点「确认支付」一次，故 PAY_CLICK_MAX=6
+// 4. 失败时 dumpVisibleButtons 打印可点击元素，方便下次定位真正的按钮文字
+var PAY_PKG_WECHAT = "com.tencent.mm";
+var PAY_PKG_ALIPAY = "com.eg.android.AlipayGphone";
+
 function handlePaymentPage() {
-    var PAY_BUTTON_TEXTS = ["立即支付", "确认支付", "去支付"];
+    var PAY_BUTTON_TEXTS = ["立即支付", "确认支付", "去支付", "提交订单", "立即下单"];
     var STOCK_OUT_KEYWORDS = ["库存不足", "已售罄", "票已售完", "已售完", "暂无余票", "无票"];
-    var PAY_TIMEOUT_MS = 5000;   // 支付页处理总时长上限
-    var PAY_CLICK_MAX = 5;       // 支付按钮最多点 5 次（一次成功，4次容错）
+    var CANCEL_KEYWORDS = ["取消", "返回", "放弃", "稍后", "再想想", "不", "关闭"];
+    var PAY_TIMEOUT_MS = 8000;   // 含两步支付，放宽到 8 秒
+    var PAY_CLICK_MAX = 6;
 
     var deadline = Date.now() + PAY_TIMEOUT_MS;
     var payClickCount = 0;
-    var cashierReached = false;
+    var firstClickMarked = false;
 
     while (Date.now() < deadline && payClickCount < PAY_CLICK_MAX) {
-        // 1. 库存不足检测：立即退出，避免对失效订单重复点击
+        // 1. 库存检测
         for (var i = 0; i < STOCK_OUT_KEYWORDS.length; i++) {
             var kw = STOCK_OUT_KEYWORDS[i];
             if (textContains(kw).exists() || descContains(kw).exists()) {
-                console.log("✗ 检测到「" + kw + "」，订单已失效，立即退出");
+                console.log("✗ 检测到「" + kw + "」，订单已失效");
                 Timer.mark("支付页·库存不足退出 (" + kw + ")");
                 return;
             }
         }
 
-        // 2. 检测是否已跳到微信/支付宝收银台 → 让脚本退场，由免密/指纹接管
-        if (textContains("微信支付").exists() || descContains("微信支付").exists() ||
-            textContains("支付宝").exists() || descContains("支付宝").exists()) {
-            cashierReached = true;
-            break;
+        // 2. 真·收银台检测：包名跳到微信/支付宝才算
+        var pkg = currentPackage();
+        if (pkg === PAY_PKG_WECHAT || pkg === PAY_PKG_ALIPAY) {
+            console.log("✓ 已跳到外部收银台 (" + pkg + ")，由指纹/免密接管");
+            Timer.mark("支付页·进入收银台 " + pkg + " (点击 " + payClickCount + " 次)");
+            device.vibrate([200, 100, 200, 100, 200]);
+            return;
         }
 
-        // 3. 精确查找支付按钮（避免点到返回/取消等其他 Button）
-        var payBtn = null;
-        for (var j = 0; j < PAY_BUTTON_TEXTS.length; j++) {
-            payBtn = text(PAY_BUTTON_TEXTS[j]).findOne(300);
-            if (payBtn) break;
-        }
-
+        // 3. 三级按钮查找 + cancel 过滤
+        var payBtn = findPayButton(PAY_BUTTON_TEXTS, CANCEL_KEYWORDS);
         if (payBtn) {
+            var btnLabel = payBtn.text() || payBtn.desc() || "[Button]";
             payBtn.click();
             payClickCount++;
-            log("✓ 点击「" + payBtn.text() + "」(第 " + payClickCount + " 次)");
-            if (payClickCount === 1) {
-                Timer.mark("支付页·首次点击「" + payBtn.text() + "」");
+            log("✓ 点击「" + btnLabel + "」(第 " + payClickCount + " 次)");
+            if (!firstClickMarked) {
+                Timer.mark("支付页·首次点击「" + btnLabel + "」");
+                firstClickMarked = true;
             }
-            sleep(800);   // 给页面跳转时间，不要 50ms 盲点
+            sleep(800);
         } else {
             sleep(200);
         }
     }
 
-    if (cashierReached) {
-        console.log("✓ 已进入收银台，请在微信指纹 / 支付宝免密 完成支付");
-        Timer.mark("支付页·进入收银台 (点击 " + payClickCount + " 次)");
-        device.vibrate([200, 100, 200, 100, 200]);
-    } else {
-        console.log("✗ 未能进入收银台（超时或库存不足），订单将在 15 分钟内回库");
-        Timer.mark("支付页·超时退出 (点击 " + payClickCount + " 次)");
+    // 走到这里 = 超时或点满，未进收银台 → 打印诊断信息
+    console.log("✗ 未能进入外部收银台 (点击 " + payClickCount + " 次)");
+    Timer.mark("支付页·超时退出 (点击 " + payClickCount + " 次)");
+    dumpVisibleButtons();
+}
+
+// 三级 cascade 查找支付按钮
+function findPayButton(positiveTexts, cancelKeywords) {
+    // Level 1：精确文本
+    for (var i = 0; i < positiveTexts.length; i++) {
+        var b = text(positiveTexts[i]).findOne(150);
+        if (b) return b;
     }
+    // Level 2：含「支付」二字 + 排除 cancel
+    var fuzzy = textContains("支付").find();
+    if (fuzzy && fuzzy.size() > 0) {
+        for (var j = 0; j < fuzzy.size(); j++) {
+            var c = fuzzy.get(j);
+            var t = c.text() || "";
+            if (containsAny(t, cancelKeywords)) continue;
+            return c;
+        }
+    }
+    // Level 3：className 兜底（原版思路）+ cancel 过滤
+    var allBtns = className("android.widget.Button").find();
+    if (allBtns && allBtns.size() > 0) {
+        for (var m = 0; m < allBtns.size(); m++) {
+            var b2 = allBtns.get(m);
+            var t2 = b2.text() || "";
+            if (containsAny(t2, cancelKeywords)) continue;
+            return b2;
+        }
+    }
+    return null;
+}
+
+function containsAny(str, keywords) {
+    if (!str) return false;
+    for (var i = 0; i < keywords.length; i++) {
+        if (str.indexOf(keywords[i]) >= 0) return true;
+    }
+    return false;
+}
+
+// 失败时打印当前页面所有可点击元素 + 含「支付」字样的元素，下次卡住直接看 log 就能定位
+function dumpVisibleButtons() {
+    log("─── 诊断·当前包名: " + currentPackage() + " ───");
+    log("─── 含「支付」字样的元素 ───");
+    var withPay = textContains("支付").find();
+    if (withPay && withPay.size() > 0) {
+        for (var i = 0; i < withPay.size(); i++) {
+            var e = withPay.get(i);
+            log("  • text=「" + (e.text() || "") + "」 desc=「" + (e.desc() || "") + "」 class=" + e.className() + " clickable=" + e.clickable());
+        }
+    } else {
+        log("  (无)");
+    }
+    log("─── 所有 Button ───");
+    var btns = className("android.widget.Button").find();
+    if (btns && btns.size() > 0) {
+        for (var k = 0; k < btns.size(); k++) {
+            var b = btns.get(k);
+            log("  • text=「" + (b.text() || "") + "」 desc=「" + (b.desc() || "") + "」");
+        }
+    } else {
+        log("  (无)");
+    }
+    log("──────────────────────");
 }
