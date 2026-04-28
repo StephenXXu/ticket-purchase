@@ -1,13 +1,18 @@
+// === 全局开关：测试时 true（开浮动 console + Timer 日志），抢票时改 false（关二者，省 UI 线程开销）===
+var TIMER_ENABLED = true;
+
 // 检查无障碍服务是否已经启用，如果没有启用则跳转到无障碍服务启用界面，并等待无障碍服务启动；当无障碍服务启动后脚本会继续运行。
 auto.waitFor();
 //打开猫眼app
 app.launchApp("猫眼");
-openConsole();
-console.setTitle("猫眼 go!", "#ff11ee00", 30);
+if (TIMER_ENABLED) {
+    openConsole();
+    console.setTitle("猫眼 go!", "#ff11ee00", 30);
+}
 
 //确认选票坐标，建议配置（不配置时仍会寻找“确认”按钮进行点击，但可能会出现点击失败的情况）
-const ConfirmX = 878;
-const ConfirmY = 2263;
+const ConfirmX = 602;
+const ConfirmY = 2241;
 
 //是否在测试调试
 var isDebug = false;
@@ -15,6 +20,48 @@ var isDebug = false;
 const debugTicketClickX = 207;
 const debugTicketClickY = 1170;
 
+// === 阶段耗时监控（轻量自闭包，不依赖外部库）===
+// 用法：Timer.start() 开计时；Timer.mark("xxx") 在每个关键节点打点；Timer.summary() 末尾打印总览。
+// 输出示例：
+//   ⏱ [+1234ms / 累计 1234ms] 已预约检测完成
+//   ⏱ [+856ms / 累计 2090ms] 开抢按钮已出现并点击
+//   ════════ 阶段耗时汇总 ════════
+//     +1234ms  →  已预约检测完成
+//     +856ms   →  开抢按钮已出现并点击
+//     ...
+//     总耗时: Xms
+var Timer = (function () {
+    var marks = [], startTs = 0;
+    return {
+        start: function () {
+            startTs = Date.now(); marks = [];
+            if (TIMER_ENABLED) log("⏱ Timer 启动");
+        },
+        mark: function (label) {
+            if (!TIMER_ENABLED) return;
+            var now = Date.now();
+            var sinceStart = now - startTs;
+            var sinceLast = marks.length > 0 ? now - marks[marks.length - 1].ts : sinceStart;
+            marks.push({ label: label, sinceStart: sinceStart, sinceLast: sinceLast, ts: now });
+            log("⏱ [+" + sinceLast + "ms / 累计 " + sinceStart + "ms] " + label);
+        },
+        summary: function () {
+            if (!TIMER_ENABLED) return;
+            log("════════ 阶段耗时汇总 ════════");
+            for (var i = 0; i < marks.length; i++) {
+                var m = marks[i];
+                log("  +" + m.sinceLast + "ms  →  " + m.label);
+            }
+            if (marks.length > 0) {
+                log("  ─────────────────────");
+                log("  总耗时: " + marks[marks.length - 1].sinceStart + "ms");
+            }
+            log("══════════════════════════════");
+        }
+    };
+})();
+
+Timer.start();
 main();
 
 function main() {
@@ -23,8 +70,10 @@ function main() {
     var preBook2 = className("android.widget.TextView").text("已填写").findOne(2000);
     var isPreBook = preBook2 != null || preBook != null;
     console.log("界面是否已预约：" + isPreBook);
+    Timer.mark("已预约检测完成 (isPreBook=" + isPreBook + ")");
     if (!isPreBook && !isDebug) {
         console.log("无预约信息，请提前填写抢票信息!（若已经开票，请到票档界面使用MoYanMonitor.js）");
+        Timer.summary();
         return;
     }
 
@@ -59,9 +108,11 @@ function main() {
             break;
         }
     }
+    Timer.mark("开抢按钮已出现并点击");
     console.log("①准备确认购票");
 
     //猛点，一直点到出现支付按钮为止
+    var confirmClickCount = 0;
     for (let cnt = 0; cnt >= 0; cnt++) {
         if (isDebug) {
             //调试模式，模拟选择票档，模拟已预约后自动选择票档
@@ -75,6 +126,7 @@ function main() {
             text("确认").click();
         }
         sleep(50);
+        confirmClickCount++;
         if (className("android.widget.Button").exists()) {
             break;
         }
@@ -82,6 +134,7 @@ function main() {
             log("已点击确认次数：" + cnt);
         }
     }
+    Timer.mark("①确认购票完成 (共点击 " + confirmClickCount + " 次)");
     console.log("②进入支付页面处理");
 
     if (isDebug) {
@@ -89,9 +142,10 @@ function main() {
     } else {
         handlePaymentPage();
     }
+    Timer.mark("②支付页处理结束");
 
     console.log("结束");
-
+    Timer.summary();
 }
 
 // 支付页面处理：精确点击 + 库存检测 + 超时退出，让微信指纹/支付宝免密接管
@@ -101,7 +155,7 @@ function handlePaymentPage() {
     var PAY_BUTTON_TEXTS = ["立即支付", "确认支付", "去支付"];
     var STOCK_OUT_KEYWORDS = ["库存不足", "已售罄", "票已售完", "已售完", "暂无余票", "无票"];
     var PAY_TIMEOUT_MS = 5000;   // 支付页处理总时长上限
-    var PAY_CLICK_MAX = 2;       // 支付按钮最多点 2 次（一次成功，一次容错）
+    var PAY_CLICK_MAX = 5;       // 支付按钮最多点 5 次（一次成功，4次容错）
 
     var deadline = Date.now() + PAY_TIMEOUT_MS;
     var payClickCount = 0;
@@ -113,6 +167,7 @@ function handlePaymentPage() {
             var kw = STOCK_OUT_KEYWORDS[i];
             if (textContains(kw).exists() || descContains(kw).exists()) {
                 console.log("✗ 检测到「" + kw + "」，订单已失效，立即退出");
+                Timer.mark("支付页·库存不足退出 (" + kw + ")");
                 return;
             }
         }
@@ -135,6 +190,9 @@ function handlePaymentPage() {
             payBtn.click();
             payClickCount++;
             log("✓ 点击「" + payBtn.text() + "」(第 " + payClickCount + " 次)");
+            if (payClickCount === 1) {
+                Timer.mark("支付页·首次点击「" + payBtn.text() + "」");
+            }
             sleep(800);   // 给页面跳转时间，不要 50ms 盲点
         } else {
             sleep(200);
@@ -143,8 +201,10 @@ function handlePaymentPage() {
 
     if (cashierReached) {
         console.log("✓ 已进入收银台，请在微信指纹 / 支付宝免密 完成支付");
+        Timer.mark("支付页·进入收银台 (点击 " + payClickCount + " 次)");
         device.vibrate([200, 100, 200, 100, 200]);
     } else {
         console.log("✗ 未能进入收银台（超时或库存不足），订单将在 15 分钟内回库");
+        Timer.mark("支付页·超时退出 (点击 " + payClickCount + " 次)");
     }
 }
