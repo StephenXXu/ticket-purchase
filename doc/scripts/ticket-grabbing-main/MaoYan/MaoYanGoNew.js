@@ -77,70 +77,62 @@ function main() {
         return;
     }
 
-    //出现刷新按钮时点击刷新（不再每次打 log，只在首次 + 每 30 次触发 Timer.mark 留痕）
+    //出现刷新按钮时点击刷新（彻底静默：包名过滤 + 真坐标点击 + 无 log，避免污染日志）
     threads.start(function () {
-        log('刷新按钮自动点击线程已启动');
-        var refreshCount = 0;
         while (true) {
-            textContains("刷新").waitFor();
-            textContains("刷新").findOne().click();
-            refreshCount++;
-            if (refreshCount === 1) {
-                Timer.mark("刷新线程·首次点击");
-            } else if (refreshCount % 30 === 0) {
-                Timer.mark("刷新线程·已点击 " + refreshCount + " 次");
-            }
-            //避免点击过快
+            textContains("刷新").packageName(MAOYAN_PKG).waitFor();
+            var refreshNode = textContains("刷新").packageName(MAOYAN_PKG).findOne();
+            tryClick(refreshNode);
             sleep(100);
         }
     });
 
     console.log("等待开抢...");
+    // packageName 过滤防止 console 浮窗内同名文字被误命中
+    var GRAB_TEXTS = ["立即预订", "立即购票", "特惠购票"];
     while (true) {
-        var but1 = classNameStartsWith('android.widget.').text("立即预订").exists();
-        var but2 = classNameStartsWith('android.widget.').text("立即购票").exists();
-        var but3 = classNameStartsWith('android.widget.').text("特惠购票").exists();
-        //var but4= classNameStartsWith('android.widget.').text("缺货登记").exists();
-        var result = but1 || but2 || but3;
-        if (result) {
-            var s;
-            if (but1) {
-                var s = classNameStartsWith('android.widget.').text("立即预订").findOne().click();
-            } else if (but2) {
-                var s = classNameStartsWith('android.widget.').text("立即购票").findOne().click();
-            } else if (but3) {
-                var s = classNameStartsWith('android.widget.').text("特惠购票").findOne().click();
-            }
+        var grabNode = null;
+        for (var gi = 0; gi < GRAB_TEXTS.length; gi++) {
+            grabNode = text(GRAB_TEXTS[gi]).packageName(MAOYAN_PKG).findOne(30);
+            if (grabNode) break;
+        }
+        if (grabNode) {
+            tryClick(grabNode);
             break;
         }
+        sleep(30);
     }
     Timer.mark("开抢按钮已出现并点击");
     console.log("①准备确认购票");
 
-    //猛点，一直点到出现支付按钮为止
+    // ①确认购票：packageName 隔离 console 污染 + bounds 真点击 + 文字检测退出 + 硬上限
+    // 旧逻辑 click(ConfirmX, ConfirmY) 固定坐标 + accessibility click 对猫眼自定义 View 几乎无效；
+    // 退出条件 className('Button').exists() 在新版猫眼极少为 true，导致循环失控（实测点了 1158823 次仍不退出）。
+    var CONFIRM_TEXTS = ["确认", "立即购买", "立即下单", "提交订单"];
+    var EXIT_TO_PAY_TEXTS = ["立即支付", "确认支付", "去支付", "支付订单"];
+    var CONFIRM_MAX = 30;
     var confirmClickCount = 0;
-    for (let cnt = 0; cnt >= 0; cnt++) {
-        if (isDebug) {
-            //调试模式，模拟选择票档，模拟已预约后自动选择票档
-            click(debugTicketClickX, debugTicketClickY);
+    var paidPageReached = false;
+    for (var cnt = 0; cnt < CONFIRM_MAX; cnt++) {
+        // 1. 已到支付页 → 提前退出
+        var atPay = false;
+        for (var i = 0; i < EXIT_TO_PAY_TEXTS.length; i++) {
+            if (text(EXIT_TO_PAY_TEXTS[i]).packageName(MAOYAN_PKG).exists()) { atPay = true; break; }
         }
+        if (atPay) { paidPageReached = true; break; }
 
-        //绝对坐标点击
-        click(ConfirmX, ConfirmY);
-        //文字查找按钮点击，避免未正确配置坐标导致的点击失败
-        if (text("确认").exists()) {
-            text("确认").click();
+        // 2. 找确认类按钮（包名限定）→ tryClick（取 bounds 中心做真·屏幕点击）
+        var confirmNode = null;
+        for (var j = 0; j < CONFIRM_TEXTS.length; j++) {
+            confirmNode = text(CONFIRM_TEXTS[j]).packageName(MAOYAN_PKG).findOne(150);
+            if (confirmNode) break;
         }
-        sleep(50);
-        confirmClickCount++;
-        if (className("android.widget.Button").exists()) {
-            break;
+        if (confirmNode && tryClick(confirmNode)) {
+            confirmClickCount++;
         }
-        if (cnt % 20 == 0) {
-            log("已点击确认次数：" + cnt);
-        }
+        sleep(200);
     }
-    Timer.mark("①确认购票完成 (共点击 " + confirmClickCount + " 次)");
+    Timer.mark("①确认购票完成 (点击 " + confirmClickCount + " 次, 已到支付页=" + paidPageReached + ")");
     console.log("②进入支付页面处理");
 
     if (isDebug) {
@@ -154,19 +146,34 @@ function main() {
     Timer.summary();
 }
 
-// 支付页面处理：三段式按钮查找 + 包名级收银台检测 + 失败时 dump 诊断
-// 设计要点：
-// 1. 用 currentPackage() 判断是否真的跳到外部微信/支付宝；只看页面文字会被 in-app 支付方式 sheet 误判
-// 2. 按钮查找三级 cascade：精确 text → textContains("支付") → className 兜底，全部排除取消/返回
-// 3. 两步支付兼容：「立即支付」→ 弹支付方式 sheet → 还要再点「确认支付」一次，故 PAY_CLICK_MAX=6
-// 4. 失败时 dumpVisibleButtons 打印可点击元素，方便下次定位真正的按钮文字
+// 包名常量：所有 selector 必须 .packageName(MAOYAN_PKG)，否则会被 AutoX 浮动 console 污染
+var MAOYAN_PKG = "com.sankuai.movie";
 var PAY_PKG_WECHAT = "com.tencent.mm";
 var PAY_PKG_ALIPAY = "com.eg.android.AlipayGphone";
 
+// 真·屏幕点击：取节点 bounds 中心坐标做 click()，绕过 AutoX accessibility action 对自定义 View（React Native/Compose/自绘）经常无响应的问题
+// 静默实现（不打 log），避免污染日志；返回 true=点击成功，false=节点无效
+function tryClick(node) {
+    if (!node) return false;
+    var b = node.bounds();
+    if (b && b.width() > 0 && b.height() > 0) {
+        click(b.centerX(), b.centerY());
+        return true;
+    }
+    // bounds 无效时兜底用 accessibility click（多半也不行，但好过完全不点）
+    try { node.click(); return true; } catch (e) { return false; }
+}
+
+// 支付页面处理：包名级收银台检测 + packageName 过滤 + bounds 真点击 + 失败时 dump 诊断
+// 设计要点：
+// 1. 用 currentPackage() 判断是否真的跳到外部微信/支付宝；只看页面文字会被 in-app 支付方式 sheet 误判
+// 2. 所有 selector 加 .packageName(MAOYAN_PKG) 过滤，杜绝 console 浮窗污染
+// 3. 两步支付兼容：「立即支付」→ 弹支付方式 sheet → 还要再点「确认支付」一次，故 PAY_CLICK_MAX=6
+// 4. 失败时 dumpVisibleButtons 打印可点击元素，方便定位真实按钮文字
 function handlePaymentPage() {
     var PAY_BUTTON_TEXTS = ["立即支付", "确认支付", "去支付", "提交订单", "立即下单"];
     var STOCK_OUT_KEYWORDS = ["库存不足", "已售罄", "票已售完", "已售完", "暂无余票", "无票"];
-    var CANCEL_KEYWORDS = ["取消", "返回", "放弃", "稍后", "再想想", "不", "关闭"];
+    var CANCEL_KEYWORDS = ["取消", "返回", "放弃", "稍后", "再想想", "关闭"];
     var PAY_TIMEOUT_MS = 8000;   // 含两步支付，放宽到 8 秒
     var PAY_CLICK_MAX = 6;
 
@@ -175,10 +182,11 @@ function handlePaymentPage() {
     var firstClickMarked = false;
 
     while (Date.now() < deadline && payClickCount < PAY_CLICK_MAX) {
-        // 1. 库存检测
+        // 1. 库存检测（包名过滤，避免误命中 console 里的关键词）
         for (var i = 0; i < STOCK_OUT_KEYWORDS.length; i++) {
             var kw = STOCK_OUT_KEYWORDS[i];
-            if (textContains(kw).exists() || descContains(kw).exists()) {
+            if (textContains(kw).packageName(MAOYAN_PKG).exists() ||
+                descContains(kw).packageName(MAOYAN_PKG).exists()) {
                 console.log("✗ 检测到「" + kw + "」，订单已失效");
                 Timer.mark("支付页·库存不足退出 (" + kw + ")");
                 return;
@@ -194,16 +202,16 @@ function handlePaymentPage() {
             return;
         }
 
-        // 3. 三级按钮查找 + cancel 过滤
+        // 3. 三级按钮查找 + cancel 过滤 + 真点击
         var payBtn = findPayButton(PAY_BUTTON_TEXTS, CANCEL_KEYWORDS);
         if (payBtn) {
             var btnLabel = payBtn.text() || payBtn.desc() || "[Button]";
-            payBtn.click();
-            payClickCount++;
-            log("✓ 点击「" + btnLabel + "」(第 " + payClickCount + " 次)");
-            if (!firstClickMarked) {
-                Timer.mark("支付页·首次点击「" + btnLabel + "」");
-                firstClickMarked = true;
+            if (tryClick(payBtn)) {
+                payClickCount++;
+                if (!firstClickMarked) {
+                    Timer.mark("支付页·首次点击「" + btnLabel + "」");
+                    firstClickMarked = true;
+                }
             }
             sleep(800);
         } else {
@@ -217,15 +225,15 @@ function handlePaymentPage() {
     dumpVisibleButtons();
 }
 
-// 三级 cascade 查找支付按钮
+// 三级 cascade 查找支付按钮（全部 packageName 过滤）
 function findPayButton(positiveTexts, cancelKeywords) {
     // Level 1：精确文本
     for (var i = 0; i < positiveTexts.length; i++) {
-        var b = text(positiveTexts[i]).findOne(150);
+        var b = text(positiveTexts[i]).packageName(MAOYAN_PKG).findOne(150);
         if (b) return b;
     }
     // Level 2：含「支付」二字 + 排除 cancel
-    var fuzzy = textContains("支付").find();
+    var fuzzy = textContains("支付").packageName(MAOYAN_PKG).find();
     if (fuzzy && fuzzy.size() > 0) {
         for (var j = 0; j < fuzzy.size(); j++) {
             var c = fuzzy.get(j);
@@ -235,7 +243,7 @@ function findPayButton(positiveTexts, cancelKeywords) {
         }
     }
     // Level 3：className 兜底（原版思路）+ cancel 过滤
-    var allBtns = className("android.widget.Button").find();
+    var allBtns = className("android.widget.Button").packageName(MAOYAN_PKG).find();
     if (allBtns && allBtns.size() > 0) {
         for (var m = 0; m < allBtns.size(); m++) {
             var b2 = allBtns.get(m);
@@ -255,11 +263,11 @@ function containsAny(str, keywords) {
     return false;
 }
 
-// 失败时打印当前页面所有可点击元素 + 含「支付」字样的元素，下次卡住直接看 log 就能定位
+// 失败时打印猫眼包内所有 Button + 含「支付」字样的元素（packageName 过滤后输出更干净）
 function dumpVisibleButtons() {
     log("─── 诊断·当前包名: " + currentPackage() + " ───");
-    log("─── 含「支付」字样的元素 ───");
-    var withPay = textContains("支付").find();
+    log("─── 含「支付」字样的元素 (猫眼包内) ───");
+    var withPay = textContains("支付").packageName(MAOYAN_PKG).find();
     if (withPay && withPay.size() > 0) {
         for (var i = 0; i < withPay.size(); i++) {
             var e = withPay.get(i);
@@ -268,8 +276,8 @@ function dumpVisibleButtons() {
     } else {
         log("  (无)");
     }
-    log("─── 所有 Button ───");
-    var btns = className("android.widget.Button").find();
+    log("─── 所有 Button (猫眼包内) ───");
+    var btns = className("android.widget.Button").packageName(MAOYAN_PKG).find();
     if (btns && btns.size() > 0) {
         for (var k = 0; k < btns.size(); k++) {
             var b = btns.get(k);
