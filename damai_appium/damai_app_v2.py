@@ -31,8 +31,10 @@ class DamaiBot:
             "platformName": "Android",  # 操作系统
             "platformVersion": "16",  # 系统版本
             "deviceName": "emulator-5554",  # 设备名称
-            "appPackage": "cn.damai",  # app 包名
-            "appActivity": ".launcher.splash.SplashMainActivity",  # app 启动 Activity
+            "appPackage": "cn.damai",  # app 包名（让 Appium 知道目标 APP）
+            # ⚠️ 故意不设 appActivity ——> Appium 不会调用 am start 拉 SplashMainActivity，避免闪屏
+            # 前提：用户跑脚本前必须保证大麦 APP 已在前台演出详情页（launch.sh 已强制要求）
+            # "appActivity": ".launcher.splash.SplashMainActivity",
             "unicodeKeyboard": True,  # 支持 Unicode 输入
             "resetKeyboard": True,  # 隐藏键盘
             "noReset": True,  # 不重置 app
@@ -45,6 +47,11 @@ class DamaiBot:
             "mjpegServerFramerate": 1,  # 降低截图帧率
             "shouldTerminateApp": False,
             "adbExecTimeout": 20000,
+            # ⚡ 启动加速：告诉 Appium 不要主动启动 / 重启 cn.damai
+            # 前提：用户启动脚本前必须保证大麦 APP 已在前台演出详情页（launch.sh 已强制要求）
+            # 效果：去掉 splash 闪屏延迟，driver init 从 ~4s 降到 ~1s
+            "dontStopAppOnReset": True,    # session 结束时不停止 APP
+            "forceAppLaunch": False,        # 不强制重新启动 APP
         }
 
         device_app_info = AppiumOptions()
@@ -150,16 +157,24 @@ class DamaiBot:
             print("开始抢票流程...")
             start_time = time.time()
 
-            # 1. 城市选择 - 准备多个备选方案
-            print("选择城市...")
-            city_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
-                (By.XPATH, f'//*[@text="{self.config.city}"]')
-            ]
-            if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
-                print("城市选择失败")
-                return False
+            # 1. 城市选择（智能跳过：已在演出详情页就不要乱点城市切换器）
+            # 大麦演唱会详情页顶部有"成都站 ▼"切换器，text("成都") 会误命中导致跳错城市
+            # 检测底部 purchase 按钮容器是否存在 → 存在 = 已在演出详情页 = 跳过城市选择
+            already_on_detail_page = len(
+                self.driver.find_elements(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
+            ) > 0
+            if already_on_detail_page:
+                print("✓ 已在演出详情页（检测到 purchase 容器），跳过城市选择")
+            else:
+                print("选择城市...")
+                city_selectors = [
+                    (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
+                    (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
+                    (By.XPATH, f'//*[@text="{self.config.city}"]')
+                ]
+                if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
+                    print("城市选择失败")
+                    return False
 
             # 2. 点击预约/立即购买按钮（恢复 4-29 改造前的"按容器 resource-id 找"逻辑）
             # 首选按容器 ID 找（不依赖文字，对图片按钮也有效）→ 找到立即点容器中心坐标
