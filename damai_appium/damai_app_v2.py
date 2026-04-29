@@ -161,46 +161,77 @@ class DamaiBot:
                 print("城市选择失败")
                 return False
 
-            # 2. 点击预约按钮 - 多种可能的按钮文本
-            print("点击预约按钮...")
+            # 2. 点击预约/立即购买按钮（恢复 4-29 改造前的"按容器 resource-id 找"逻辑）
+            # 首选按容器 ID 找（不依赖文字，对图片按钮也有效）→ 找到立即点容器中心坐标
+            # ⚠️ 不再轮询等 clickable=true（演唱会按钮容器 dump 显示 clickable=false 但视觉激活）
+            # ⚠️ 用户需精确控制启动时机：脚本启动后 ~5 秒到达此步，按钮渲染好就立即点
+            print("点击预约/立即购买按钮（按容器 resource-id 找+点中心）...")
             book_selectors = [
                 (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")'),
-                (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]')
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*|.*抢票.*|.*特惠.*")'),
+                (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买") or contains(@text,"立即")]')
             ]
             if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
-                print("预约按钮点击失败")
+                print("✗ 预约按钮点击失败（容器和文字都没找到）")
                 return False
 
-            # 3. 票价选择 - 优化查找逻辑
+            # 3. 票价选择 - 优化查找逻辑 + 售罄拦截
             print("选择票价...")
-            try:
-                # 直接尝试点击，不等待容器，实际每次都失败，只能等待
-                price_container = self.driver.find_element(By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')
-                # price_container = self.wait.until(  # 等待找到容器
-                #     EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')))
-                # 在容器内找 index=1 且 clickable="true" 的 FrameLayout【因为799元的票价是排在第二的，但是page里text是空的被隐藏了】
+            SOLD_OUT_KEYWORDS = ('缺货登记', '已售罄', '票已售完', '无票', '暂无余票')
+
+            def _is_sold_out(target_el):
+                """扫描目标票档子节点文字，命中售罄关键字则返回该关键字，否则 None"""
+                try:
+                    sub_texts = []
+                    for s in target_el.find_elements(AppiumBy.XPATH, './/*'):
+                        try:
+                            t = s.text
+                            if t:
+                                sub_texts.append(t)
+                        except Exception:
+                            continue
+                    joined = ' '.join(sub_texts)
+                    for kw in SOLD_OUT_KEYWORDS:
+                        if kw in joined:
+                            return kw, joined
+                except Exception:
+                    pass
+                return None, ''
+
+            def _select_price():
+                """主流程：找容器 → 找目标 index → 售罄检查 → 点击。返回 (success, sold_out_kw)"""
+                price_container = self.wait.until(
+                    EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout'))
+                )
                 target_price = price_container.find_element(
                     AppiumBy.ANDROID_UIAUTOMATOR,
                     f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
                 )
+                kw, joined = _is_sold_out(target_price)
+                if kw:
+                    return False, (kw, joined)
+                self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
+                return True, None
+
+            try:
+                # 直接尝试点击，不等待容器（首次往往容器还没渲染完）
+                price_container = self.driver.find_element(By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')
+                target_price = price_container.find_element(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
+                )
+                kw, joined = _is_sold_out(target_price)
+                if kw:
+                    print(f"✗ price_index={self.config.price_index} 已售罄（命中「{kw}」: {joined}），按「只抢配置档」策略立即退出")
+                    return False
                 self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
             except Exception as e:
-                print(f"票价选择失败，启动备用方案: {e}")
-                # 备用方案
-                # 先找到大容器
-                price_container = self.wait.until(
-                    EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')))
-                # 在容器内找 index=1 且 clickable="true" 的 FrameLayout【因为799元的票价是排在第二的，但是page里text是空的被隐藏了】
-                target_price = price_container.find_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                )
-                self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
-
-                # if not self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR,
-                #                              'new UiSelector().textMatches(".*799.*|.*\\d+元.*")'):
-                #     return False
+                print(f"票价主方案失败（{type(e).__name__}），启动备用方案带 wait")
+                ok, sold_out = _select_price()
+                if not ok:
+                    kw, joined = sold_out
+                    print(f"✗ price_index={self.config.price_index} 已售罄（命中「{kw}」: {joined}），按「只抢配置档」策略立即退出")
+                    return False
 
             # 4. 数量选择
             print("选择数量...")
