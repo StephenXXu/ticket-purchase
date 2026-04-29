@@ -46,51 +46,44 @@ else
     exit 1
 fi
 
-# 检查Android SDK
+# 检查Android SDK / ADB（真机抢票最低要求：adb 可用即可）
 echo ""
-echo "📱 检查Android SDK..."
-if [ -d "/Users/shengwang/Library/Android/sdk" ]; then
-    echo "✅ Android SDK路径存在"
-    export ANDROID_HOME=/Users/shengwang/Library/Android/sdk
-    export ANDROID_SDK_ROOT=/Users/shengwang/Library/Android/sdk
-else
-    echo "❌ Android SDK路径不存在"
-    echo "   请安装Android Studio并配置SDK"
-    exit 1
-fi
+echo "📱 检查Android SDK / ADB..."
+: "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
+: "${ANDROID_SDK_ROOT:=$ANDROID_HOME}"
+export ANDROID_HOME ANDROID_SDK_ROOT
 
-# 检查ADB
-echo ""
-echo "🔧 检查ADB..."
+ADB_BIN=""
 if command -v adb &> /dev/null; then
-    echo "✅ ADB可用"
+    ADB_BIN="adb"
+    echo "✅ ADB 可用 ($(command -v adb))"
+elif [ -x "$ANDROID_HOME/platform-tools/adb" ]; then
+    ADB_BIN="$ANDROID_HOME/platform-tools/adb"
+    echo "✅ ADB 路径: $ADB_BIN"
+    export PATH="$ANDROID_HOME/platform-tools:$PATH"
 else
-    ADB_PATH="/Users/shengwang/Library/Android/sdk/platform-tools/adb"
-    if [ -f "$ADB_PATH" ]; then
-        echo "✅ ADB路径: $ADB_PATH"
-    else
-        echo "❌ ADB未找到"
-        exit 1
-    fi
+    echo "❌ ADB 未找到"
+    echo "   方案A（仅真机抢票）: brew install --cask android-platform-tools"
+    echo "   方案B（含模拟器）  : 安装 Android Studio 并设置 ANDROID_HOME"
+    exit 1
 fi
 
 # 检查Android设备
 echo ""
 echo "📱 检查Android设备..."
-DEVICES=$(/Users/shengwang/Library/Android/sdk/platform-tools/adb devices | grep -c "device$")
+DEVICES=$($ADB_BIN devices | grep -c "device$")
 if [ $DEVICES -eq 0 ]; then
     echo "⚠️  未检测到Android设备"
-    echo "   请启动模拟器或连接真机"
-    echo "   启动模拟器: /Users/shengwang/Library/Android/sdk/emulator/emulator -avd Medium_Phone_API_36.0"
+    echo "   真机：插上 USB 数据线，在手机上确认 USB 调试授权"
+    echo "   模拟器：\$ANDROID_HOME/emulator/emulator -avd <YourAVDName>"
 else
     echo "✅ 检测到 $DEVICES 个Android设备"
-    
+
     # 检查大麦APP
-    if /Users/shengwang/Library/Android/sdk/platform-tools/adb shell pm list packages | grep -q "cn.damai"; then
+    if $ADB_BIN shell pm list packages | grep -q "cn.damai"; then
         echo "✅ 大麦APP已安装"
     else
-        echo "⚠️  大麦APP未安装"
-        echo "   请在设备上安装大麦APP"
+        echo "⚠️  大麦APP未安装，请在设备上安装"
     fi
 fi
 

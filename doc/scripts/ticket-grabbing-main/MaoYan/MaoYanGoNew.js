@@ -80,8 +80,8 @@ function main() {
     //出现刷新按钮时点击刷新（彻底静默：包名过滤 + 真坐标点击 + 无 log，避免污染日志）
     threads.start(function () {
         while (true) {
-            textContains("刷新").packageName(MAOYAN_PKG).waitFor();
-            var refreshNode = textContains("刷新").packageName(MAOYAN_PKG).findOne();
+            textContains("刷新").waitFor();
+            var refreshNode = textContains("刷新").findOne();
             tryClick(refreshNode);
             sleep(100);
         }
@@ -93,7 +93,7 @@ function main() {
     while (true) {
         var grabNode = null;
         for (var gi = 0; gi < GRAB_TEXTS.length; gi++) {
-            grabNode = text(GRAB_TEXTS[gi]).packageName(MAOYAN_PKG).findOne(30);
+            grabNode = text(GRAB_TEXTS[gi]).findOne(30);
             if (grabNode) break;
         }
         if (grabNode) {
@@ -117,14 +117,14 @@ function main() {
         // 1. 已到支付页 → 提前退出
         var atPay = false;
         for (var i = 0; i < EXIT_TO_PAY_TEXTS.length; i++) {
-            if (text(EXIT_TO_PAY_TEXTS[i]).packageName(MAOYAN_PKG).exists()) { atPay = true; break; }
+            if (text(EXIT_TO_PAY_TEXTS[i]).exists()) { atPay = true; break; }
         }
         if (atPay) { paidPageReached = true; break; }
 
         // 2. 找确认类按钮（包名限定）→ tryClick（取 bounds 中心做真·屏幕点击）
         var confirmNode = null;
         for (var j = 0; j < CONFIRM_TEXTS.length; j++) {
-            confirmNode = text(CONFIRM_TEXTS[j]).packageName(MAOYAN_PKG).findOne(150);
+            confirmNode = text(CONFIRM_TEXTS[j]).findOne(150);
             if (confirmNode) break;
         }
         if (confirmNode && tryClick(confirmNode)) {
@@ -146,8 +146,10 @@ function main() {
     Timer.summary();
 }
 
-// 包名常量：所有 selector 必须 .packageName(MAOYAN_PKG)，否则会被 AutoX 浮动 console 污染
-var MAOYAN_PKG = "com.sankuai.movie";
+// 收银台外部包名（用于 currentPackage() 比较，判断是否已跳到微信/支付宝）
+// 注：曾尝试 var MAOYAN_PKG = "com.sankuai.movie"; 给所有 selector 加 .packageName 过滤，
+// 但常量与实际版本不符会让所有 selector 返回 null（连"立即预订"都识别不到），已回滚。
+// 排除 console 污染请改用 TIMER_ENABLED=false 关闭浮动 console。
 var PAY_PKG_WECHAT = "com.tencent.mm";
 var PAY_PKG_ALIPAY = "com.eg.android.AlipayGphone";
 
@@ -164,10 +166,10 @@ function tryClick(node) {
     try { node.click(); return true; } catch (e) { return false; }
 }
 
-// 支付页面处理：包名级收银台检测 + packageName 过滤 + bounds 真点击 + 失败时 dump 诊断
+// 支付页面处理：包名级收银台检测 + bounds 真点击 + 失败时 dump 诊断
 // 设计要点：
 // 1. 用 currentPackage() 判断是否真的跳到外部微信/支付宝；只看页面文字会被 in-app 支付方式 sheet 误判
-// 2. 所有 selector 加 .packageName(MAOYAN_PKG) 过滤，杜绝 console 浮窗污染
+// 2. 三级 cascade 按钮查找：精确 text → textContains("支付") 模糊 → className('Button') 兜底，全部排除取消/返回
 // 3. 两步支付兼容：「立即支付」→ 弹支付方式 sheet → 还要再点「确认支付」一次，故 PAY_CLICK_MAX=6
 // 4. 失败时 dumpVisibleButtons 打印可点击元素，方便定位真实按钮文字
 function handlePaymentPage() {
@@ -185,8 +187,8 @@ function handlePaymentPage() {
         // 1. 库存检测（包名过滤，避免误命中 console 里的关键词）
         for (var i = 0; i < STOCK_OUT_KEYWORDS.length; i++) {
             var kw = STOCK_OUT_KEYWORDS[i];
-            if (textContains(kw).packageName(MAOYAN_PKG).exists() ||
-                descContains(kw).packageName(MAOYAN_PKG).exists()) {
+            if (textContains(kw).exists() ||
+                descContains(kw).exists()) {
                 console.log("✗ 检测到「" + kw + "」，订单已失效");
                 Timer.mark("支付页·库存不足退出 (" + kw + ")");
                 return;
@@ -229,11 +231,11 @@ function handlePaymentPage() {
 function findPayButton(positiveTexts, cancelKeywords) {
     // Level 1：精确文本
     for (var i = 0; i < positiveTexts.length; i++) {
-        var b = text(positiveTexts[i]).packageName(MAOYAN_PKG).findOne(150);
+        var b = text(positiveTexts[i]).findOne(150);
         if (b) return b;
     }
     // Level 2：含「支付」二字 + 排除 cancel
-    var fuzzy = textContains("支付").packageName(MAOYAN_PKG).find();
+    var fuzzy = textContains("支付").find();
     if (fuzzy && fuzzy.size() > 0) {
         for (var j = 0; j < fuzzy.size(); j++) {
             var c = fuzzy.get(j);
@@ -243,7 +245,7 @@ function findPayButton(positiveTexts, cancelKeywords) {
         }
     }
     // Level 3：className 兜底（原版思路）+ cancel 过滤
-    var allBtns = className("android.widget.Button").packageName(MAOYAN_PKG).find();
+    var allBtns = className("android.widget.Button").find();
     if (allBtns && allBtns.size() > 0) {
         for (var m = 0; m < allBtns.size(); m++) {
             var b2 = allBtns.get(m);
@@ -267,7 +269,7 @@ function containsAny(str, keywords) {
 function dumpVisibleButtons() {
     log("─── 诊断·当前包名: " + currentPackage() + " ───");
     log("─── 含「支付」字样的元素 (猫眼包内) ───");
-    var withPay = textContains("支付").packageName(MAOYAN_PKG).find();
+    var withPay = textContains("支付").find();
     if (withPay && withPay.size() > 0) {
         for (var i = 0; i < withPay.size(); i++) {
             var e = withPay.get(i);
@@ -277,7 +279,7 @@ function dumpVisibleButtons() {
         log("  (无)");
     }
     log("─── 所有 Button (猫眼包内) ───");
-    var btns = className("android.widget.Button").packageName(MAOYAN_PKG).find();
+    var btns = className("android.widget.Button").find();
     if (btns && btns.size() > 0) {
         for (var k = 0; k < btns.size(); k++) {
             var b = btns.get(k);

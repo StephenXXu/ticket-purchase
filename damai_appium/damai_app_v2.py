@@ -239,14 +239,17 @@ class DamaiBot:
             # self.batch_click(user_clicks, delay=0.05)  # 极短延迟
             self.ultra_batch_click(user_clicks)
 
-            # 7. 提交订单
-            print("提交订单...")
-            submit_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                (By.XPATH, '//*[contains(@text,"提交")]')
-            ]
-            self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+            # 7. 提交订单（受 if_commit_order 开关控制；冒烟测试请置为 false 避免误下单）
+            if not getattr(self.config, "if_commit_order", True):
+                print("⚠️ 冒烟模式 (if_commit_order=false)：跳过提交订单，请人工核对界面")
+            else:
+                print("提交订单...")
+                submit_selectors = [
+                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+                    (By.XPATH, '//*[contains(@text,"提交")]')
+                ]
+                self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
 
             end_time = time.time()
             print(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
