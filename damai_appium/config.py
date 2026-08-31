@@ -9,7 +9,8 @@ import json
 
 
 class Config:
-    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order):
+    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
+                 perform_index=None):
         self.server_url = server_url
         self.keyword = keyword
         self.users = users
@@ -18,6 +19,8 @@ class Config:
         self.price = price
         self.price_index = price_index
         self.if_commit_order = if_commit_order
+        # 场次在 project_detail_perform_flowlayout 里的序号；None/负数 = 不主动选场次
+        self.perform_index = perform_index
 
     @staticmethod
     def load_config():
@@ -30,4 +33,5 @@ class Config:
                       config['date'],
                       config['price'],
                       config['price_index'],
-                      config['if_commit_order'])
+                      config['if_commit_order'],
+                      config.get('perform_index'))

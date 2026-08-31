@@ -17,7 +17,7 @@
 
 set -u
 
-RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLU='\033[0;34m'; NC='\033[0m'
+RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YEL=$'\033[1;33m'; BLU=$'\033[0;34m'; NC=$'\033[0m'
 
 CFG=damai_appium/config.jsonc
 APPIUM_PORT=4723
@@ -45,10 +45,30 @@ command -v poetry  >/dev/null 2>&1 || die "poetry 未安装（brew install poetr
 [ -f "$CFG" ]                       || die "$CFG 不存在"
 [ -f "damai_appium/damai_app_v3_daemon.py" ] || die "v3 daemon 脚本不存在"
 
-DEVICES=$(adb devices | grep -c "device$")
-[ "$DEVICES" -gt 0 ] || die "没有 Android 设备连接"
-adb shell pm list packages | grep -q "cn.damai" || die "大麦 APP 未安装"
-ok "工具链/配置/设备/大麦APP 全就绪（设备 ${DEVICES} 台）"
+# 设备状态细分：device / unauthorized / offline，报错要能直接指导下一步
+ADB_LIST=$(adb devices | tail -n +2 | grep -v '^[[:space:]]*$')
+UDID=${DAMAI_UDID:-$(echo "$ADB_LIST" | awk '$2=="device"{print $1; exit}')}
+if [ -z "$UDID" ]; then
+    if echo "$ADB_LIST" | grep -q "unauthorized"; then
+        die "设备处于 unauthorized —— 手机上点「允许 USB 调试」并勾选「一律允许」后重跑"
+    elif echo "$ADB_LIST" | grep -q "offline"; then
+        die "设备 offline —— 拔插数据线或 adb kill-server && adb start-server 后重跑"
+    else
+        die "adb 认不到设备 —— 检查：① 开发者选项 USB 调试已开（Flyme 还需开 USB 安装）② USB 模式选「传输文件/MTP」不是「仅充电」③ 用数据线不是充电线"
+    fi
+fi
+DEV_MODEL=$(adb -s "$UDID" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+DEV_REL=$(adb -s "$UDID" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+adb -s "$UDID" shell pm list packages 2>/dev/null | grep -q "cn.damai" || die "设备 $UDID 未安装大麦 APP"
+DAMAI_VER=$(adb -s "$UDID" shell dumpsys package cn.damai 2>/dev/null | grep -m1 versionName | tr -d '\r ' | cut -d= -f2)
+export DAMAI_UDID="$UDID"
+ok "设备就绪: ${DEV_MODEL} / Android ${DEV_REL} / udid=${UDID} / 大麦 ${DAMAI_VER:-未知}"
+
+# 屏幕锁屏会让 uiautomator 抓不到控件，检查一下当前是否亮屏
+SCREEN_ON=$(adb -s "$UDID" shell dumpsys deviceidle 2>/dev/null | grep -m1 "mScreenOn=" | tr -d '\r' | cut -d= -f2)
+if [ "$SCREEN_ON" = "false" ]; then
+    warn "屏幕当前是熄的，抢票期间必须保持亮屏（可执行 adb -s $UDID shell svc power stayon usb 让 USB 供电时常亮）"
+fi
 echo
 
 # ---------- 2. 确保 Appium 已跑 ----------

@@ -39,6 +39,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 from config import Config
+from device import detect_device, assert_app_installed
 
 RED = "\033[1;31m"
 GRN = "\033[1;32m"
@@ -53,6 +54,9 @@ class DamaiDaemon:
 
     def __init__(self):
         self.config = Config.load_config()
+        self.device = detect_device()
+        assert_app_installed(self.device.udid)
+        print(f"  运行设备: {self.device.describe()}")
         self.driver = None
         self.wait = None
         self._setup_driver()
@@ -61,8 +65,9 @@ class DamaiDaemon:
         """driver 仅初始化一次（第 1 次启动会闪一下）"""
         capabilities = {
             "platformName": "Android",
-            "platformVersion": "16",
-            "deviceName": "emulator-5554",
+            "platformVersion": self.device.platform_version,
+            "deviceName": self.device.udid,
+            "udid": self.device.udid,
             "appPackage": "cn.damai",
             "unicodeKeyboard": True,
             "resetKeyboard": True,
@@ -179,36 +184,65 @@ class DamaiDaemon:
             print(f"{BLU}开始抢票流程...{NC}")
             start = time.time()
 
-            # 1. 智能跳过 city
-            already_on_detail = len(
-                self.driver.find_elements(
-                    By.ID,
-                    "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
-                )
-            ) > 0
-            if already_on_detail:
-                print("✓ 已在演出详情页，跳过城市选择")
+            # 0. 判断当前停在哪一层页面
+            # 大麦有两层：演出详情页(有 purchase_status_bar) → SKU 选场次票档页(NcovSkuActivity)
+            # 2026-08-31 实测：直接停在 SKU 页时，原来的 step1 会判定「不在详情页」→ 去点城市
+            # → 找不到城市文本 → 返回 False，整个流程白跑。故这里显式区分。
+            on_sku_page = "NcovSkuActivity" in (self.driver.current_activity or "")
+            if on_sku_page:
+                print("✓ 已在 SKU 选票页，跳过城市选择与底部入口点击")
             else:
-                print("选择城市...")
-                city_selectors = [
-                    (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
-                    (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
-                    (By.XPATH, f'//*[@text="{self.config.city}"]'),
+                # 1. 智能跳过 city
+                already_on_detail = len(
+                    self.driver.find_elements(
+                        By.ID,
+                        "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+                    )
+                ) > 0
+                if already_on_detail:
+                    print("✓ 已在演出详情页，跳过城市选择")
+                else:
+                    print("选择城市...")
+                    city_selectors = [
+                        (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
+                        (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
+                        (By.XPATH, f'//*[@text="{self.config.city}"]'),
+                    ]
+                    if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
+                        print(f"{RED}✗ 城市选择失败{NC}")
+                        return False
+
+                # 2. 点底部按钮进 SKU 页
+                # ⚠️ 只在详情页做。SKU 页的底部按钮在预约态是「已预约」，点它会取消预约。
+                print("点击预约/立即购买按钮...")
+                book_selectors = [
+                    (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
+                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*|.*抢票.*|.*特惠.*")'),
+                    (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买") or contains(@text,"立即")]'),
                 ]
-                if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
-                    print(f"{RED}✗ 城市选择失败{NC}")
+                if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
+                    print(f"{RED}✗ 预约按钮点击失败{NC}")
                     return False
 
-            # 2. 点底部按钮
-            print("点击预约/立即购买按钮...")
-            book_selectors = [
-                (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*|.*抢票.*|.*特惠.*")'),
-                (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买") or contains(@text,"立即")]'),
-            ]
-            if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
-                print(f"{RED}✗ 预约按钮点击失败{NC}")
-                return False
+            # 2.5 选场次（原流程没有这步，7 个场次时不能赌它默认落在目标日期）
+            # 容器 project_detail_perform_flowlayout，index 与页面上的场次顺序一一对应
+            perform_index = getattr(self.config, "perform_index", None)
+            if perform_index is not None and perform_index >= 0:
+                print(f"选择场次 index={perform_index} ({self.config.date})...")
+                try:
+                    perform_container = self.driver.find_element(
+                        By.ID, "cn.damai:id/project_detail_perform_flowlayout"
+                    )
+                    target_perform = perform_container.find_element(
+                        AppiumBy.ANDROID_UIAUTOMATOR,
+                        f'new UiSelector().index({perform_index}).clickable(true)',
+                    )
+                    self.driver.execute_script("mobile: clickGesture", {"elementId": target_perform.id})
+                    time.sleep(0.15)
+                except Exception as e:
+                    print(f"{YEL}⚠ 场次点击失败（{type(e).__name__}），沿用页面当前选中的场次{NC}")
+            else:
+                print("未配置 perform_index，沿用页面当前选中的场次")
 
             # 3. 选票价 + 售罄拦截
             print("选择票价...")

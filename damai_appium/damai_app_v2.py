@@ -16,11 +16,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from config import Config
+from device import detect_device, assert_app_installed
 
 
 class DamaiBot:
     def __init__(self):
         self.config = Config.load_config()
+        self.device = detect_device()
+        assert_app_installed(self.device.udid)
+        print(f"  运行设备: {self.device.describe()}")
         self.driver = None
         self.wait = None
         self._setup_driver()
@@ -29,8 +33,9 @@ class DamaiBot:
         """初始化驱动配置"""
         capabilities = {
             "platformName": "Android",  # 操作系统
-            "platformVersion": "16",  # 系统版本
-            "deviceName": "emulator-5554",  # 设备名称
+            "platformVersion": self.device.platform_version,  # 系统版本（adb 探测）
+            "deviceName": self.device.udid,  # 设备名称（adb 探测）
+            "udid": self.device.udid,  # 真机必填，多设备时定位唯一设备
             "appPackage": "cn.damai",  # app 包名（让 Appium 知道目标 APP）
             # ⚠️ 故意不设 appActivity ——> Appium 不会调用 am start 拉 SplashMainActivity，避免闪屏
             # 前提：用户跑脚本前必须保证大麦 APP 已在前台演出详情页（launch.sh 已强制要求）
@@ -151,44 +156,63 @@ class DamaiBot:
                 continue
         return False
 
+    def _enter_sku_page(self):
+        """从演出详情页进入 SKU 选票页。
+
+        ⚠️ 已在 SKU 页时不要调用：textContains(city) 会误命中页面标题，
+        随后 textMatches('.*预约.*') 会点到底部「已预约」而取消预约。
+        """
+        # 1. 城市选择（智能跳过：已在演出详情页就不要乱点城市切换器）
+        # 大麦演唱会详情页顶部有"成都站 ▼"切换器，text("成都") 会误命中导致跳错城市
+        # 检测底部 purchase 按钮容器是否存在 → 存在 = 已在演出详情页 = 跳过城市选择
+        already_on_detail_page = len(
+            self.driver.find_elements(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
+        ) > 0
+        if already_on_detail_page:
+            print("✓ 已在演出详情页（检测到 purchase 容器），跳过城市选择")
+        else:
+            print("选择城市...")
+            city_selectors = [
+                (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
+                (By.XPATH, f'//*[@text="{self.config.city}"]')
+            ]
+            if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
+                print("城市选择失败")
+                return False
+
+        # 2. 点击预约/立即购买按钮（恢复 4-29 改造前的"按容器 resource-id 找"逻辑）
+        # 首选按容器 ID 找（不依赖文字，对图片按钮也有效）→ 找到立即点容器中心坐标
+        # ⚠️ 不再轮询等 clickable=true（演唱会按钮容器 dump 显示 clickable=false 但视觉激活）
+        # ⚠️ 用户需精确控制启动时机：脚本启动后 ~5 秒到达此步，按钮渲染好就立即点
+        print("点击预约/立即购买按钮（按容器 resource-id 找+点中心）...")
+        book_selectors = [
+            (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*|.*抢票.*|.*特惠.*")'),
+            (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买") or contains(@text,"立即")]')
+        ]
+        if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
+            print("✗ 预约按钮点击失败（容器和文字都没找到）")
+            return False
+        return True
+
     def run_ticket_grabbing(self):
         """执行抢票主流程"""
         try:
             print("开始抢票流程...")
             start_time = time.time()
 
-            # 1. 城市选择（智能跳过：已在演出详情页就不要乱点城市切换器）
-            # 大麦演唱会详情页顶部有"成都站 ▼"切换器，text("成都") 会误命中导致跳错城市
-            # 检测底部 purchase 按钮容器是否存在 → 存在 = 已在演出详情页 = 跳过城市选择
-            already_on_detail_page = len(
-                self.driver.find_elements(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
-            ) > 0
-            if already_on_detail_page:
-                print("✓ 已在演出详情页（检测到 purchase 容器），跳过城市选择")
+            # 0. SKU 页守卫（2026-08-31 补）
+            # 若已停在 SKU 选票页，绝不能再走「选城市 → 点底部按钮」：
+            #   - textContains(city) 会误命中页面标题「成都·薛之谦…」，让城市选择"假成功"
+            #   - 随后 textMatches(".*预约.*") 会命中底部的「已预约 / 取消预约」→ 点下去取消预约
+            # 故 SKU 页直接跳到票档选择。
+            if "NcovSkuActivity" in (self.driver.current_activity or ""):
+                print("✓ 已在 SKU 选票页，跳过城市选择与底部入口点击（防止误取消预约）")
             else:
-                print("选择城市...")
-                city_selectors = [
-                    (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
-                    (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
-                    (By.XPATH, f'//*[@text="{self.config.city}"]')
-                ]
-                if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
-                    print("城市选择失败")
+                # 进 SKU 页失败（城市选不中 / 底部按钮找不到）→ 中止，行为与抽方法前一致
+                if not self._enter_sku_page():
                     return False
-
-            # 2. 点击预约/立即购买按钮（恢复 4-29 改造前的"按容器 resource-id 找"逻辑）
-            # 首选按容器 ID 找（不依赖文字，对图片按钮也有效）→ 找到立即点容器中心坐标
-            # ⚠️ 不再轮询等 clickable=true（演唱会按钮容器 dump 显示 clickable=false 但视觉激活）
-            # ⚠️ 用户需精确控制启动时机：脚本启动后 ~5 秒到达此步，按钮渲染好就立即点
-            print("点击预约/立即购买按钮（按容器 resource-id 找+点中心）...")
-            book_selectors = [
-                (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*|.*抢票.*|.*特惠.*")'),
-                (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买") or contains(@text,"立即")]')
-            ]
-            if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
-                print("✗ 预约按钮点击失败（容器和文字都没找到）")
-                return False
 
             # 3. 票价选择 - 优化查找逻辑 + 售罄拦截
             print("选择票价...")

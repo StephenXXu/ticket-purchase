@@ -1,12 +1,14 @@
 {
   "server_url": "http://127.0.0.1:4723",
-  "keyword": "徐良",
+  "keyword": "薛之谦 万兽之王",
   "users": [
-    "高小丽"
+    "余海霞",
+    "徐兴院"
   ],
   "city": "成都",
-  "date": "05.05",
-  "price": "看台380元",
-  "price_index": 4,
-  "if_commit_order": true
+  "date": "2026-10-02",
+  "price": "看台517元",
+  "perform_index": null,
+  "price_index": 1,
+  "if_commit_order": false
 }
