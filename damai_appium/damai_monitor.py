@@ -44,6 +44,9 @@ NC = "\033[0m"
 
 PRICE_CONTAINER_ID = "cn.damai:id/project_detail_perform_price_flowlayout"
 SOLD_OUT_KEYWORDS = ("缺货登记", "已售罄", "票已售完", "无票", "暂无余票")
+# 预约态：演出还没开售，票档只能"预约想看"，不是真的可买。
+# 2026-08-31 实测：不判这个的话，预约期内每一轮都会把 7 个票档全报成"可购"（假警报）。
+RESERVE_KEYWORDS = ("可预约", "已预约", "预约", "即将开售", "未开售", "即将预售")
 DUMP_DEVICE_PATH = "/sdcard/damai_monitor_dump.xml"
 DUMP_LOCAL_PATH = "/tmp/damai_monitor_dump.xml"
 
@@ -91,8 +94,10 @@ def parse_tickets(xml_path: str) -> list:
                     t = sub.attrib.get("text", "").strip()
                     if t:
                         texts.append(t)
-                sold_out = any(kw in " ".join(texts) for kw in SOLD_OUT_KEYWORDS)
-                results.append((i, sold_out, texts))
+                joined = " ".join(texts)
+                sold_out = any(kw in joined for kw in SOLD_OUT_KEYWORDS)
+                reserving = any(kw in joined for kw in RESERVE_KEYWORDS)
+                results.append((i, sold_out, reserving, texts))
             return results
     return []
 
@@ -119,8 +124,18 @@ def render_status(round_num: int, tickets: list) -> list:
     if not tickets:
         print(f"{YEL}[{ts}] 第 {round_num} 轮: 票档容器未渲染（你不在票档列表页）{NC}")
         return []
-    available = [(i, txts) for i, sold, txts in tickets if not sold]
-    sold_count = sum(1 for _, s, _ in tickets if s)
+    # 只有"既不售罄、也不处于预约态"才算真正可买
+    available = [(i, txts) for i, sold, reserving, txts in tickets if not sold and not reserving]
+    sold_count = sum(1 for _, sold, _, _ in tickets if sold)
+    reserve_count = sum(1 for _, _, reserving, _ in tickets if reserving)
+
+    if reserve_count and not available:
+        print(
+            f"{YEL}[{ts}] 第 {round_num} 轮: 预约态未开售"
+            f"（{reserve_count}/{len(tickets)} 档显示可预约），继续等待{NC}",
+            flush=True,
+        )
+        return []
     if available:
         print(f"{INV}{RED}[{ts}] 🎉 第 {round_num} 轮: 发现 {len(available)} 档可购票！{NC}")
         for i, txts in available:
