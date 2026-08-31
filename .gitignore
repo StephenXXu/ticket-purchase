@@ -178,3 +178,11 @@ credentials.json
 # Lock files (except poetry.lock)
 *.lock
 !poetry.lock
+# 本地策略底稿，不入公开仓库（2026-08-31）
+# 原因：① 仓库是 public fork；② 含真实观演人姓名等个人信息；
+#       ③ 含风控对抗 / Cookie 池 / 多账号等内容，不公开分发。
+# 需要留存请自行本地备份。
+doc/api-direct-solutions.md
+doc/damai-best-practice.md
+doc/failure-analysis-and-optimization.md
+doc/maoyan-implementation-plan.md
